@@ -1,0 +1,14 @@
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via tqdm
+et-xmlfile==2.0.0
+    # via openpyxl
+mutagen==1.48.1
+    # via music-library-audit
+openpyxl==3.1.5
+    # via music-library-audit
+rapidfuzz==3.14.5 ; python_full_version < '3.11'
+    # via music-library-audit
+rapidfuzz==3.14.6 ; python_full_version >= '3.11'
+    # via music-library-audit
+tqdm==4.70.0
+    # via music-library-audit

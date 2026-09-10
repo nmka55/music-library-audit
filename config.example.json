@@ -1,0 +1,14 @@
+{
+  "apple_music_xml": "input/Library.xml",
+  "offline_music_roots": [],
+  "output_excel": "output/Music_Library_Audit.xlsx",
+  "cache_directory": "cache",
+  "manual_matches_file": "manual_matches.json",
+  "duration_tolerance_seconds": 3,
+  "deep_integrity_check": false,
+  "matched_threshold": 90,
+  "review_threshold": 70,
+  "workers": 4,
+  "probe_timeout_seconds": 45,
+  "deep_timeout_seconds": 600
+}
