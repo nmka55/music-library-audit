@@ -1,4 +1,3 @@
-import csv
 from pathlib import Path
 import plistlib
 import shutil
@@ -6,6 +5,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+from openpyxl import load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import reconcile_libraries as rl
@@ -171,18 +172,20 @@ class ReconcileCLITests(unittest.TestCase):
             self.assertEqual(before, {p: p.read_bytes() for p in before})
 
             def rows(name):
-                with open(work / "output" / name, encoding="utf-8-sig") as f:
-                    return list(csv.DictReader(f))
+                sheet = load_workbook(work / "output" / name).active
+                header, *body = sheet.iter_rows(values_only=True)
+                self.assertGreater(sheet.max_column, 5)
+                return [dict(zip(header, row)) for row in body]
 
             plan = {
                 Path(r["Internet File"]).name: r["Recommendation"]
-                for r in rows("Internet_Duplicates_Of_Purchased.csv")
+                for r in rows("Internet_Duplicates_Of_Purchased.xlsx")
             }
             self.assertEqual(plan, {"Signal copy.m4a": rl.REMOVE, "Cloud.m4a": rl.KEEP_REMOTE})
             self.assertEqual(
-                [r["Title"] for r in rows("Apple_Music_Missing_Everywhere.csv")], ["Nowhere"]
+                [r["Title"] for r in rows("Apple_Music_Missing_Everywhere.xlsx")], ["Nowhere"]
             )
-            self.assertEqual(len(rows("Purchased_Albums_In_Internet_Collection.csv")), 1)
+            self.assertEqual(len(rows("Purchased_Albums_In_Internet_Collection.xlsx")), 1)
 
 
 if __name__ == "__main__":

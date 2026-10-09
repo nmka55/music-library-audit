@@ -1,12 +1,11 @@
 """Compare an Apple Music XML export with a purchased-music XML export.
 
-Writes a multi-column CSV of Apple Music tracks that are NOT confidently present in
-the purchased library. Both XML files are read-only inputs; the CSV is written inside
+Writes a multi-column Excel file of Apple Music tracks that are NOT confidently present in
+the purchased library. Both XML files are read-only inputs; the workbook is written inside
 the workspace output directory.
 """
 
 import argparse
-import csv
 import os
 import plistlib
 import sys
@@ -127,7 +126,7 @@ def duration_text(track):
 
 
 def compare(apple_tracks, purchased_tracks, tolerance=3, include_matched=False):
-    """Return CSV dictionaries for Apple Music tracks, sorted for browsing."""
+    """Return row dictionaries for Apple Music tracks, sorted for browsing."""
     indexes = index([prepare(t) for t in purchased_tracks])
     results = []
     for track in apple_tracks:
@@ -158,23 +157,38 @@ def compare(apple_tracks, purchased_tracks, tolerance=3, include_matched=False):
     return results
 
 
-def write_csv(rows, destination, columns=COLUMNS):
+def write_xlsx(rows, destination, columns=COLUMNS):
+    """Write the table as a workbook: every column is its own cell, text stays literal."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".tmp")
-    # utf-8-sig lets Excel open accented titles correctly; csv quotes commas for us.
-    with open(temporary, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({k: _csv_safe(row.get(k, "")) for k in columns})
+    from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    from openpyxl.styles import Font
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Results"
+    ws.append(list(columns))
+    for row in rows:
+        values = []
+        for column in columns:
+            value = row.get(column, "")
+            if isinstance(value, str):
+                value = ILLEGAL_CHARACTERS_RE.sub("", value)[:32767]
+            values.append(value)
+        ws.append(values)
+        for cell in ws[ws.max_row]:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"  # literal text, never a formula
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for index_, column in enumerate(columns, 1):
+        longest = max([len(str(column))] + [len(str(r.get(column, ""))) for r in rows[:500]])
+        ws.column_dimensions[ws.cell(1, index_).column_letter].width = min(max(longest + 2, 10), 60)
+    temporary = destination.with_name(destination.stem + ".tmp.xlsx")
+    wb.save(temporary)
     os.replace(temporary, destination)
-
-
-def _csv_safe(value):
-    """Stop spreadsheet apps from treating imported text as a formula."""
-    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
-        return "'" + value
-    return value
 
 
 def candidate_xmls(workspace):
@@ -205,17 +219,17 @@ def choose_xml(label, workspace, ask=input, tell=print, exclude=None):
         tell("That is not an existing file. Try again.")
 
 
-def output_path(c, requested=None, default_name="Apple_Music_Not_In_Purchased.csv"):
-    """CSV destination: inside the workspace output folder, never over an input or music root."""
+def output_path(c, requested=None, default_name="Apple_Music_Not_In_Purchased.xlsx"):
+    """Workbook destination: inside the workspace output folder, never over an input or music root."""
     workspace = Path(c["_workspace"])
     default = Path(c["output_excel"]).parent / default_name
     path = resolve_path(requested, workspace) if requested else default
-    if path.suffix.lower() != ".csv":
-        raise ValueError("Output must end in .csv")
+    if path.suffix.lower() != ".xlsx":
+        raise ValueError("Output must end in .xlsx")
     if not path.is_relative_to(workspace):
-        raise ValueError("The CSV must be written inside the workspace")
+        raise ValueError("The workbook must be written inside the workspace")
     if any(path.is_relative_to(Path(root)) for root in c["offline_music_roots"]):
-        raise ValueError("The CSV cannot be written inside a read-only music folder")
+        raise ValueError("The workbook cannot be written inside a read-only music folder")
     return path
 
 
@@ -225,11 +239,13 @@ def main(argv=None, ask=input, tell=print):
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
         description="Compare an Apple Music library XML with a purchased-music library XML "
-        "and write a CSV of Apple Music tracks missing from the purchased library"
+        "and write an Excel file of Apple Music tracks missing from the purchased library"
     )
     parser.add_argument("--apple", help="Apple Music library XML (asked for if omitted)")
     parser.add_argument("--purchased", help="Purchased music library XML (asked for if omitted)")
-    parser.add_argument("--output", help="CSV path inside the workspace (default: output/*.csv)")
+    parser.add_argument(
+        "--output", help="Excel .xlsx path inside the workspace (default: output/*.xlsx)"
+    )
     parser.add_argument("--workspace", help="Workspace directory (default: project folder)")
     parser.add_argument(
         "--config", help="Local JSON settings path (default: workspace/config.json)"
@@ -262,7 +278,7 @@ def main(argv=None, ask=input, tell=print):
         parser.error("Choose two different XML files.")
     destination = output_path(c, args.output)
     if destination in (apple, purchased):
-        parser.error("The CSV cannot overwrite an input XML.")
+        parser.error("The workbook cannot overwrite an input XML.")
     apple_tracks, purchased_tracks = read_tracks(apple), read_tracks(purchased)
     rows = compare(
         apple_tracks,
@@ -270,7 +286,7 @@ def main(argv=None, ask=input, tell=print):
         c["duration_tolerance_seconds"],
         args.include_matched,
     )
-    write_csv(rows, destination)
+    write_xlsx(rows, destination)
     counts = {s: sum(r["Status"] == s for r in rows) for s in (MATCHED, POSSIBLE, NOT_FOUND)}
     tell(f"\nApple Music tracks:    {len(apple_tracks):,}")
     tell(f"Purchased tracks:      {len(purchased_tracks):,}")
@@ -282,7 +298,7 @@ def main(argv=None, ask=input, tell=print):
     tell(f"Not in purchased:      {counts[NOT_FOUND]:,}")
     if not any(r["iTunes Link"] for r in rows):
         tell("No iTunes/store link fields exist in this XML, so that column is empty.")
-    tell(f"CSV written: {destination}")
+    tell(f"Excel file written: {destination}")
     return 0
 
 

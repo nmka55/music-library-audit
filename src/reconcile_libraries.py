@@ -9,7 +9,7 @@ Answers two questions without changing any file:
    folder?
 
 The downloaded folder is read with the existing tag/FFprobe scanner and conservative
-matcher (without SHA-256, so each file is not read in full). Results are CSV files in
+matcher (without SHA-256, so each file is not read in full). Results are Excel files in
 the workspace output directory.
 """
 
@@ -35,7 +35,7 @@ from compare_libraries import (
     output_path,
     prepare,
     read_tracks,
-    write_csv,
+    write_xlsx,
 )
 from config import load, resolve_path
 from matcher import CandidateIndex, score
@@ -285,7 +285,7 @@ def missing_everywhere(apple, purchased_index, finder, config):
 
 
 def reconcile(apple_tracks, purchased_tracks, offline, config, state_of=purchased_state):
-    """Pure comparison step: dictionaries in, three lists of CSV rows out."""
+    """Pure comparison step: dictionaries in, three lists of Excel rows out."""
     apple = [dict(t) for t in apple_tracks]
     purchased = [dict(t) for t in purchased_tracks]
     for row in apple + purchased:
@@ -376,9 +376,9 @@ def main(argv=None, ask=input, tell=print):
     outputs = {
         name: output_path(c, None, name)
         for name in (
-            "Internet_Duplicates_Of_Purchased.csv",
-            "Purchased_Albums_In_Internet_Collection.csv",
-            "Apple_Music_Missing_Everywhere.csv",
+            "Internet_Duplicates_Of_Purchased.xlsx",
+            "Purchased_Albums_In_Internet_Collection.xlsx",
+            "Apple_Music_Missing_Everywhere.xlsx",
         )
     }
     cache = Path(c["cache_directory"]) / "reconcile"
@@ -397,9 +397,9 @@ def main(argv=None, ask=input, tell=print):
         if r.get("File Type") != "AppleDouble metadata sidecar"
     ]
     plan, albums, missing, protected = reconcile(apple_tracks, purchased_tracks, offline, c)
-    write_csv(plan, outputs["Internet_Duplicates_Of_Purchased.csv"], PLAN_COLUMNS)
-    write_csv(albums, outputs["Purchased_Albums_In_Internet_Collection.csv"], ALBUM_COLUMNS)
-    write_csv(missing, outputs["Apple_Music_Missing_Everywhere.csv"], MISSING_COLUMNS)
+    write_xlsx(plan, outputs["Internet_Duplicates_Of_Purchased.xlsx"], PLAN_COLUMNS)
+    write_xlsx(albums, outputs["Purchased_Albums_In_Internet_Collection.xlsx"], ALBUM_COLUMNS)
+    write_xlsx(missing, outputs["Apple_Music_Missing_Everywhere.xlsx"], MISSING_COLUMNS)
 
     def count(rows, column, value):
         return sum(r[column] == value for r in rows)
@@ -413,8 +413,8 @@ def main(argv=None, ask=input, tell=print):
     tell(f"  {MISSING}: {count(missing, 'Status', MISSING):,}")
     tell(f"  {POSSIBLE}: {count(missing, 'Status', POSSIBLE):,}  (check by hand)")
     if errors:
-        tell(f"\n{len(errors)} folder(s) could not be read; see audit.log in the output folder.")
-    tell("\nNothing was deleted or changed. Review the CSV files, then remove files yourself:")
+        tell(f"\n{len(errors)} folder(s) could not be fully read; those files are not in the results.")
+    tell("\nNothing was deleted or changed. Review the Excel files, then remove files yourself:")
     for path in outputs.values():
         tell(f"  {path}")
     return 0

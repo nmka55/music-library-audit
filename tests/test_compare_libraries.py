@@ -1,9 +1,10 @@
-import csv
 from pathlib import Path
 import plistlib
 import sys
 import tempfile
 import unittest
+
+from openpyxl import load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import compare_libraries as cl
@@ -74,7 +75,7 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rows["One"]["iTunes Link"], "https://example.test/one")
         self.assertEqual(rows["Two"]["iTunes Link"], "")
 
-    def test_cli_writes_multicolumn_csv_without_changing_inputs(self):
+    def test_cli_writes_multicolumn_workbook_without_changing_inputs(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             apple, purchased = base / "apple.xml", base / "purchased.xml"
@@ -90,14 +91,17 @@ class CompareTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             self.assertEqual(before, (apple.read_bytes(), purchased.read_bytes()))
-            with open(
-                base / "output" / "Apple_Music_Not_In_Purchased.csv", encoding="utf-8-sig"
-            ) as f:
-                rows = list(csv.DictReader(f))
-            self.assertEqual(list(rows[0]), list(cl.COLUMNS))
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["Title"], "'=Boom")
-            self.assertEqual(rows[0]["Duration"], "1:00")
+            sheet = load_workbook(base / "output" / "Apple_Music_Not_In_Purchased.xlsx").active
+            table = list(sheet.iter_rows(values_only=True))
+            # Every field sits in its own cell, never one cell holding a whole row.
+            self.assertEqual(sheet.max_column, len(cl.COLUMNS))
+            self.assertEqual(list(table[0]), list(cl.COLUMNS))
+            self.assertEqual(len(table), 2)
+            row = dict(zip(table[0], table[1]))
+            self.assertEqual(row["Title"], "=Boom")
+            self.assertEqual(sheet["A2"].data_type, "s")
+            self.assertEqual(row["Duration"], "1:00")
+            self.assertEqual(row["Year"], 2001)
 
     def test_interactive_choice_by_number_or_path_and_output_boundary(self):
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside:
@@ -114,9 +118,9 @@ class CompareTests(unittest.TestCase):
             )
             self.assertEqual(other, second.resolve())
             with self.assertRaises(ValueError):
-                cl.output_path(cl.load(workspace=base), str(Path(outside) / "x.csv"))
+                cl.output_path(cl.load(workspace=base), str(Path(outside) / "x.xlsx"))
             with self.assertRaises(ValueError):
-                cl.output_path(cl.load(workspace=base), "output/x.txt")
+                cl.output_path(cl.load(workspace=base), "output/x.csv")
 
 
 if __name__ == "__main__":
