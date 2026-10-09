@@ -33,6 +33,7 @@ PUBLIC_FILES = (
     "src/review.py",
     "src/compare_libraries.py",
     "src/reconcile_libraries.py",
+    "src/track_matching.py",
     "src/setup_wizard.py",
     "src/apple_music_xml.py",
     "src/audio_scanner.py",
@@ -53,6 +54,7 @@ PUBLIC_FILES = (
     "tests/test_review.py",
     "tests/test_compare_libraries.py",
     "tests/test_reconcile_libraries.py",
+    "tests/test_track_matching.py",
     "scripts/prepare_release.py",
 )
 

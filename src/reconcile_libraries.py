@@ -24,32 +24,37 @@ from urllib.parse import unquote, urlparse
 
 from compare_libraries import (
     COLUMNS,
-    MATCHED,
-    NOT_FOUND,
-    POSSIBLE,
     choose_xml,
-    classify,
     duration_text,
-    index,
     link_for,
     output_path,
-    prepare,
     read_tracks,
     write_xlsx,
 )
 from config import load, resolve_path
-from matcher import CandidateIndex, score
 from normalization import normalize, prepare_apple, prepare_offline
+from track_matching import (
+    LOOSE_SECONDS,
+    STRICT,
+    LIKELY,
+    POSSIBLE as WEAK,
+    TIER_RANK,
+    LooseIndex,
+    prepare as prepare_query,
+)
 
 REMOVE = "REMOVE CANDIDATE"
+LIKELY_DUP = "LIKELY DUPLICATE: review, then remove"
 KEEP_REMOTE = "KEEP: purchased copy not downloaded"
 KEEP_GONE = "KEEP: purchased file not found on this computer"
 REVIEW_CHANGED = "REVIEW: purchased file differs from the XML"
 REVIEW_WEAK = "REVIEW: possible match, not confident"
 MISSING = "MISSING EVERYWHERE"
+POSSIBLE = "POSSIBLE MATCH"
 
 PLAN_COLUMNS = (
     "Recommendation",
+    "Match Type",
     "Internet File",
     "Internet Title",
     "Internet Artist",
@@ -62,8 +67,9 @@ PLAN_COLUMNS = (
     "Purchased Album",
     "Purchased File",
     "Purchased Format",
-    "Match Confidence",
-    "Reason",
+    "Duration Difference (s)",
+    "Album Tracks In This Folder",
+    "Evidence",
 )
 ALBUM_COLUMNS = (
     "Album",
@@ -72,18 +78,22 @@ ALBUM_COLUMNS = (
     "With Internet Copy",
     "Purchased File On Disk",
     "Internet Files To Remove",
+    "Likely Duplicates To Review",
+    "Best Internet Folder",
+    "Tracks In That Folder",
 )
 MISSING_COLUMNS = COLUMNS[:6] + ("Status", "Closest Match", "Reason")
+TIER_LABEL = {STRICT: "Strict", LIKELY: "Likely", WEAK: "Possible"}
 # Lower is better when one downloaded file matches several purchased tracks.
 STATE_RANK = {"OK": 0, "CHANGED": 1, "MISSING_LOCAL": 2, "NOT_DOWNLOADED": 3}
 STATE_RECOMMENDATION = {
-    "OK": REMOVE,
-    "CHANGED": REVIEW_CHANGED,
-    "MISSING_LOCAL": KEEP_GONE,
-    "NOT_DOWNLOADED": KEEP_REMOTE,
+    "OK": {STRICT: REMOVE, LIKELY: LIKELY_DUP},
+    "CHANGED": {STRICT: REVIEW_CHANGED, LIKELY: REVIEW_CHANGED},
+    "MISSING_LOCAL": {STRICT: KEEP_GONE, LIKELY: KEEP_GONE},
+    "NOT_DOWNLOADED": {STRICT: KEEP_REMOTE, LIKELY: KEEP_REMOTE},
 }
 STATE_REASON = {
-    "OK": "same recording as a purchased file that exists on this computer",
+    "OK": "the purchased copy exists on this computer",
     "CHANGED": "purchased file size no longer equals the XML size; check it before removing",
     "MISSING_LOCAL": "XML lists the purchased file, but it is not at that path now",
     "NOT_DOWNLOADED": "the purchased track is cloud-only; download it in iTunes first",
@@ -137,44 +147,65 @@ def album_key(track):
     )
 
 
-def scored_candidates(track, finder, config):
-    return [score(track, row, config) for row in finder.candidates(track)]
+def as_file_rows(tracks):
+    """Present XML tracks as file-like rows so one matcher can search them."""
+    rows = []
+    for number, track in enumerate(tracks):
+        rows.append(
+            {
+                "Full Path": f"purchased:{track.get('Persistent ID') or number}",
+                "Library Root": "purchased",
+                "Title": track.get("Name", ""),
+                "Artist": track.get("Artist", ""),
+                "Album": track.get("Album", ""),
+                "Album Artist": track.get("Album Artist", ""),
+                "Duration": (track.get("Total Time") or 0) / 1000 or None,
+                "Track Number": track.get("Track Number"),
+                "Disc Number": track.get("Disc Number"),
+                "Year": track.get("Year"),
+                "Archive Eligible": True,
+                "_track": track,
+                "_virtual": True,
+            }
+        )
+    return rows
 
 
-def is_confident(s, config):
-    return s["safe"] and s["Overall Confidence"] >= config["matched_threshold"]
-
-
-def plan_internet_copies(purchased, finder, config, state_of):
+def plan_internet_copies(purchased, finder, config, state_of, loose_seconds):
     """One row per downloaded file that matches (or may match) a purchased track."""
     found = {}
     for track in purchased:
         state = None
-        for s in scored_candidates(track, finder, config):
-            confident = is_confident(s, config)
-            if not confident and not (
-                s["meaningful"] and s["Overall Confidence"] >= config["review_threshold"]
-            ):
-                continue
+        for m in finder.find(track, config, loose_seconds):
             if state is None:
                 state = state_of(track)
-            rank = (0 if confident else 1, STATE_RANK[state[0]], -s["Overall Confidence"])
-            path = s["file"]["Full Path"]
+            rank = (TIER_RANK[m["tier"]], STATE_RANK[state[0]], m["diff"] or 0)
+            path = m["file"]["Full Path"]
             if path not in found or rank < found[path]["rank"]:
-                found[path] = {
-                    "rank": rank,
-                    "score": s,
-                    "track": track,
-                    "state": state,
-                    "confident": confident,
-                }
+                found[path] = {"rank": rank, "match": m, "track": track, "state": state}
+    folder_tracks = defaultdict(set)
+    album_sizes = defaultdict(int)
+    for track in purchased:
+        album_sizes[album_key(track)] += 1
+    for path, hit in found.items():
+        if hit["match"]["tier"] != WEAK:
+            folder_tracks[(album_key(hit["track"]), os.path.dirname(path))].add(id(hit["track"]))
     rows = []
     for path, hit in found.items():
-        b, track, s = hit["score"]["file"], hit["track"], hit["score"]
+        m, track = hit["match"], hit["track"]
+        b, tier = m["file"], m["tier"]
         state, purchased_path = hit["state"]
+        key = album_key(track)
+        together = len(folder_tracks.get((key, os.path.dirname(path)), ()))
+        evidence = m["evidence"]
+        if tier != WEAK:
+            evidence += "; " + STATE_REASON[state]
         rows.append(
             {
-                "Recommendation": STATE_RECOMMENDATION[state] if hit["confident"] else REVIEW_WEAK,
+                "Recommendation": REVIEW_WEAK
+                if tier == WEAK
+                else STATE_RECOMMENDATION[state][tier],
+                "Match Type": TIER_LABEL[tier],
                 "Internet File": path,
                 "Internet Title": b.get("Title", ""),
                 "Internet Artist": b.get("Artist", ""),
@@ -189,36 +220,61 @@ def plan_internet_copies(purchased, finder, config, state_of):
                 "Purchased Format": f"{track.get('Bit Rate', '')} kbps"
                 if track.get("Bit Rate")
                 else "",
-                "Match Confidence": s["Overall Confidence"],
-                "Reason": STATE_REASON[state] if hit["confident"] else s["Match Reason"],
-                "_album": album_key(track),
+                "Duration Difference (s)": round(m["diff"], 1) if m["diff"] is not None else "",
+                "Album Tracks In This Folder": f"{together} of {album_sizes[key]}"
+                if together
+                else "",
+                "Evidence": evidence,
+                "_album": key,
                 "_track": id(track),
+                "_folder": os.path.dirname(path),
+                "_tier": tier,
             }
         )
-    order = {REMOVE: 0, REVIEW_CHANGED: 1, REVIEW_WEAK: 2, KEEP_GONE: 3, KEEP_REMOTE: 4}
-    rows.sort(key=lambda r: (order[r["Recommendation"]], r["Internet File"].casefold()))
+    order = {
+        REMOVE: 0,
+        LIKELY_DUP: 1,
+        REVIEW_CHANGED: 2,
+        REVIEW_WEAK: 3,
+        KEEP_GONE: 4,
+        KEEP_REMOTE: 5,
+    }
+    rows.sort(
+        key=lambda r: (
+            order[r["Recommendation"]],
+            r["Purchased Artist"].casefold(),
+            r["Purchased Album"].casefold(),
+            r["Internet File"].casefold(),
+        )
+    )
     return rows
 
 
 def album_summary(purchased, plan, state_of):
-    albums = defaultdict(lambda: {"tracks": 0, "disk": 0, "internet": set(), "remove": set()})
+    albums = defaultdict(
+        lambda: {"tracks": 0, "disk": 0, "internet": set(), "remove": 0, "likely": 0, "folders": {}}
+    )
+    samples = {}
     for track in purchased:
-        entry = albums[album_key(track)]
+        key = album_key(track)
+        samples.setdefault(key, track)
+        entry = albums[key]
         entry["tracks"] += 1
         entry["disk"] += state_of(track)[0] == "OK"
-    by_track = {id(t): t for t in purchased}
     for row in plan:
-        if row["Recommendation"] == REVIEW_WEAK:
+        if row["_tier"] == WEAK:
             continue
         entry = albums[row["_album"]]
         entry["internet"].add(row["_track"])
-        if row["Recommendation"] == REMOVE:
-            entry["remove"].add(row["Internet File"])
+        entry["remove"] += row["Recommendation"] == REMOVE
+        entry["likely"] += row["Recommendation"] == LIKELY_DUP
+        entry["folders"].setdefault(row["_folder"], set()).add(row["_track"])
     rows = []
     for key, entry in albums.items():
-        if not entry["internet"] and not entry["remove"]:
+        if not entry["internet"]:
             continue
-        sample = next(t for t in by_track.values() if album_key(t) == key)
+        sample = samples[key]
+        folder, tracks = max(entry["folders"].items(), key=lambda kv: len(kv[1]))
         rows.append(
             {
                 "Album": sample.get("Album", ""),
@@ -226,40 +282,47 @@ def album_summary(purchased, plan, state_of):
                 "Purchased Tracks": entry["tracks"],
                 "With Internet Copy": len(entry["internet"]),
                 "Purchased File On Disk": entry["disk"],
-                "Internet Files To Remove": len(entry["remove"]),
+                "Internet Files To Remove": entry["remove"],
+                "Likely Duplicates To Review": entry["likely"],
+                "Best Internet Folder": folder,
+                "Tracks In That Folder": len(tracks),
             }
         )
-    rows.sort(key=lambda r: (-r["Internet Files To Remove"], r["Album Artist"].casefold()))
+    rows.sort(
+        key=lambda r: (
+            -(r["Internet Files To Remove"] + r["Likely Duplicates To Review"]),
+            -r["With Internet Copy"],
+            r["Album Artist"].casefold(),
+        )
+    )
     return rows
 
 
-def missing_everywhere(apple, purchased_index, finder, config):
-    """Apple Music tracks found in neither the purchased XML nor the downloaded folder."""
+def missing_everywhere(apple, purchased_finder, internet_finder, config, loose_seconds):
+    """Apple Music tracks that neither the purchased XML nor the downloaded folder holds."""
     rows = []
-    tolerance = config["duration_tolerance_seconds"]
     for track in apple:
-        status, other, reason = classify(prepare(track), purchased_index, tolerance)
-        if status == MATCHED:
+        in_purchased = purchased_finder.find(track, config, loose_seconds)
+        in_folder = internet_finder.find(track, config, loose_seconds)
+        if any(m["tier"] != WEAK for m in in_purchased + in_folder):
             continue
-        closest = (
-            f"Purchased: {other['track'].get('Name', '')} - {other['track'].get('Artist', '')}"
-            if other
-            else ""
+        status, closest, reason = (
+            MISSING,
+            "",
+            "not in the purchased library or the downloaded folder",
         )
-        found = scored_candidates(track, finder, config)
-        if any(is_confident(s, config) for s in found):
-            continue
-        weak = sorted(
-            (s for s in found if s["meaningful"]),
-            key=lambda s: -s["Overall Confidence"],
-        )
-        if weak and status == NOT_FOUND:
-            status, reason = POSSIBLE, "downloaded folder: " + weak[0]["Match Reason"]
-            closest = "Downloaded: " + weak[0]["file"]["Full Path"]
-        elif status == POSSIBLE:
-            reason = "purchased library: " + reason
-        else:
-            status, reason = MISSING, "not in the purchased library or the downloaded folder"
+        weak = [("Purchased", m) for m in in_purchased] + [("Downloaded", m) for m in in_folder]
+        if weak:
+            where, m = min(
+                weak, key=lambda w: (-(w[1]["title"] + w[1]["artist"]), w[1]["diff"] or 999)
+            )
+            b = m["file"]
+            status, reason = POSSIBLE, f"{where.lower()}: {m['evidence']}"
+            closest = (
+                f"Purchased: {b.get('Title', '')} - {b.get('Artist', '')} ({b.get('Album', '')})"
+                if where == "Purchased"
+                else f"Downloaded: {b['Full Path']}"
+            )
         rows.append(
             {
                 "Title": track.get("Name", ""),
@@ -284,12 +347,20 @@ def missing_everywhere(apple, purchased_index, finder, config):
     return rows
 
 
-def reconcile(apple_tracks, purchased_tracks, offline, config, state_of=purchased_state):
+def reconcile(
+    apple_tracks,
+    purchased_tracks,
+    offline,
+    config,
+    state_of=purchased_state,
+    loose_seconds=LOOSE_SECONDS,
+):
     """Pure comparison step: dictionaries in, three lists of Excel rows out."""
     apple = [dict(t) for t in apple_tracks]
     purchased = [dict(t) for t in purchased_tracks]
     for row in apple + purchased:
         prepare_apple(row)
+        prepare_query(row)
     for row in offline:
         prepare_offline(row)
     # The purchased files themselves must never be offered as removable copies.
@@ -297,7 +368,11 @@ def reconcile(apple_tracks, purchased_tracks, offline, config, state_of=purchase
         key_of(location_to_path(t["Location"])) for t in purchased_tracks if t.get("Location")
     }
     candidates = [r for r in offline if key_of(r["Full Path"]) not in protected]
-    finder = CandidateIndex(candidates)
+    internet_finder = LooseIndex(candidates)
+    purchased_rows = as_file_rows(purchased_tracks)
+    for row in purchased_rows:
+        prepare_offline(row)
+    purchased_finder = LooseIndex(purchased_rows)
     states = {}
 
     def cached_state(track):
@@ -305,10 +380,9 @@ def reconcile(apple_tracks, purchased_tracks, offline, config, state_of=purchase
             states[id(track)] = state_of(track)
         return states[id(track)]
 
-    plan = plan_internet_copies(purchased, finder, config, cached_state)
+    plan = plan_internet_copies(purchased, internet_finder, config, cached_state, loose_seconds)
     albums = album_summary(purchased, plan, cached_state)
-    purchased_index = index([prepare(t) for t in purchased_tracks])
-    missing = missing_everywhere(apple, purchased_index, finder, config)
+    missing = missing_everywhere(apple, purchased_finder, internet_finder, config, loose_seconds)
     return plan, albums, missing, len(offline) - len(candidates)
 
 
@@ -340,11 +414,19 @@ def main(argv=None, ask=input, tell=print):
         action="append",
         help="Downloaded-music folder; repeat for several (default: saved folders, else asked)",
     )
+    parser.add_argument(
+        "--duration-seconds",
+        type=float,
+        default=LOOSE_SECONDS,
+        help="Largest duration difference still treated as the same song (default: %(default)s)",
+    )
     parser.add_argument("--workspace", help="Workspace directory (default: project folder)")
     parser.add_argument(
         "--config", help="Local JSON settings path (default: workspace/config.json)"
     )
     args = parser.parse_args(argv)
+    if not 0 <= args.duration_seconds <= 30:
+        parser.error("--duration-seconds must be between 0 and 30")
     c = load(args.config, args.workspace)
     workspace = Path(c["_workspace"])
     if (
@@ -396,7 +478,9 @@ def main(argv=None, ask=input, tell=print):
         for r in inventory(files, scan_config)
         if r.get("File Type") != "AppleDouble metadata sidecar"
     ]
-    plan, albums, missing, protected = reconcile(apple_tracks, purchased_tracks, offline, c)
+    plan, albums, missing, protected = reconcile(
+        apple_tracks, purchased_tracks, offline, c, loose_seconds=args.duration_seconds
+    )
     write_xlsx(plan, outputs["Internet_Duplicates_Of_Purchased.xlsx"], PLAN_COLUMNS)
     write_xlsx(albums, outputs["Purchased_Albums_In_Internet_Collection.xlsx"], ALBUM_COLUMNS)
     write_xlsx(missing, outputs["Apple_Music_Missing_Everywhere.xlsx"], MISSING_COLUMNS)
@@ -404,16 +488,20 @@ def main(argv=None, ask=input, tell=print):
     def count(rows, column, value):
         return sum(r[column] == value for r in rows)
 
-    megabytes = sum(r["Internet Size (MB)"] for r in plan if r["Recommendation"] == REMOVE)
+    megabytes = sum(
+        r["Internet Size (MB)"] for r in plan if r["Recommendation"] in (REMOVE, LIKELY_DUP)
+    )
     tell("\nDownloaded files that duplicate purchased tracks:")
-    for label in (REMOVE, KEEP_REMOTE, KEEP_GONE, REVIEW_CHANGED, REVIEW_WEAK):
+    for label in (REMOVE, LIKELY_DUP, KEEP_REMOTE, KEEP_GONE, REVIEW_CHANGED, REVIEW_WEAK):
         tell(f"  {label}: {count(plan, 'Recommendation', label):,}")
-    tell(f"  Space held by REMOVE CANDIDATE files: {megabytes / 1000:,.1f} GB")
+    tell(f"  Space held by REMOVE CANDIDATE and LIKELY DUPLICATE files: {megabytes / 1000:,.1f} GB")
     tell("\nApple Music tracks not in the purchased library or the downloaded folder:")
     tell(f"  {MISSING}: {count(missing, 'Status', MISSING):,}")
     tell(f"  {POSSIBLE}: {count(missing, 'Status', POSSIBLE):,}  (check by hand)")
     if errors:
-        tell(f"\n{len(errors)} folder(s) could not be fully read; those files are not in the results.")
+        tell(
+            f"\n{len(errors)} folder(s) could not be fully read; those files are not in the results."
+        )
     tell("\nNothing was deleted or changed. Review the Excel files, then remove files yourself:")
     for path in outputs.values():
         tell(f"  {path}")

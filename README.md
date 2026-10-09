@@ -81,6 +81,8 @@ A track is compared by Persistent ID, then by normalized title, credited artists
 python src/reconcile_libraries.py --apple "input/Library.xml" --purchased "input/Purchased.xml" --music-root "/path/to/downloads"
 ```
 
+Optional: `--duration-seconds N` (0-30, default 10) sets the largest duration difference still treated as the same song.
+
 Omitted options are asked for interactively (`--music-root` can repeat; saved audit folders are used if present). It writes three Excel workbooks to `output/`:
 
 | File | Contents |
@@ -89,7 +91,17 @@ Omitted options are asked for interactively (`--music-root` can repeat; saved au
 | `Purchased_Albums_In_Internet_Collection.xlsx` | Per purchased album: tracks, how many have a downloaded copy, how many purchased files exist on disk, files to remove |
 | `Apple_Music_Missing_Everywhere.xlsx` | Apple Music tracks found in neither the purchased XML nor the folder (`MISSING EVERYWHERE`), or only weakly (`POSSIBLE MATCH`) |
 
-A downloaded file is a **REMOVE CANDIDATE** only when it passes the audit matcher's automatic gates (title, artist, version, duration, readable DRM-free audio) against a purchased track **and** that track's `Location` in the XML is an existing file whose size still equals the XML size. Purchased tracks without a `Location` (cloud-only, `Track Type` Remote) are `KEEP: purchased copy not downloaded`: download them in iTunes first, then export a new XML and rerun. A purchased file listed in the XML is itself never offered as a candidate. Other labels: `KEEP: purchased file not found on this computer`, `REVIEW: purchased file differs from the XML`, `REVIEW: possible match, not confident`.
+Downloaded files are matched by **title, artist and duration, ignoring the album**, because the same song legitimately sits on a single, an "all time hits" compilation and the original album. Each match gets a tier:
+
+| Match Type | Meaning |
+|---|---|
+| Strict | Passes the audit matcher's automatic gates (near-identical title, artist and duration, readable DRM-free audio) |
+| Likely | Same song title and artist, duration within `--duration-seconds` (default 10), same kind of recording. Tolerates `(Remastered)`, `(Explicit)`, `- Single Version`, feature credits, `The Beatles` vs `Beatles`, `Artist & Guest` vs `Artist`, a track number in the title, and untagged files whose artist and title come from the filename (`03 - Artist - Song.mp3`) or folder name |
+| Possible | Similar, but a person should look: a live/remix/acoustic version, a large duration gap, a weak artist match, or an unreadable/protected file |
+
+Live, remix, acoustic, demo, instrumental, karaoke and extended versions never count as the same recording as a plain one, and "Part 1" never matches "Part 2".
+
+The tier and the purchased file's state decide the recommendation. **REMOVE CANDIDATE** needs a Strict match; a Likely match is **LIKELY DUPLICATE: review, then remove**; both also need the purchased track's `Location` in the XML to be an existing file whose size still equals the XML size. Purchased tracks without a `Location` (cloud-only, `Track Type` Remote) are `KEEP: purchased copy not downloaded`: download them in iTunes first, then export a new XML and rerun. A purchased file listed in the XML is itself never offered as a candidate. Other labels: `KEEP: purchased file not found on this computer`, `REVIEW: purchased file differs from the XML`, `REVIEW: possible match, not confident`. The `Album Tracks In This Folder` column (for example `9 of 12`) shows how many tracks of that purchased album sit in the same downloaded folder; a high count makes a Likely match much more convincing. `Apple_Music_Missing_Everywhere.xlsx` counts Strict and Likely matches in either source as present, so only tracks with no plausible copy are `MISSING EVERYWHERE`.
 
 **The program never deletes, moves or edits anything.** Open the workbooks in Excel, review the plan (sort by `Recommendation`, compare the format and bitrate columns, since a downloaded FLAC or 320 kbps file may sound better than a 256 kbps purchase) and remove files yourself. Run it on the computer that holds both the downloaded folder and the purchased files, otherwise every purchased file looks missing.
 

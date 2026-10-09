@@ -16,7 +16,7 @@ Entry point: `src/audit.py` (plus the standalone `src/compare_libraries.py` and 
 - Six-sheet Excel report, metadata-based album/disc audit, four duplicate categories and standalone report validation.
 - AppleDouble detection and separate accounting, literal Excel text cells, source-change checks during scanning.
 - Standalone `src/compare_libraries.py` (covered by `tests/test_compare_libraries.py`): interactive or `--apple`/`--purchased` XML comparison writing a workspace Excel workbook; no iTunes link exists in standard exports, so that column is filled only from store-URL fields when present.
-- Standalone `src/reconcile_libraries.py` (covered by `tests/test_reconcile_libraries.py`, including an FFmpeg end-to-end run): downloaded-folder duplicates of purchased tracks as a reviewable plan, plus Apple Music tracks missing from both libraries. Deletion is deliberately not implemented; adding it would require an explicit product decision and a change to the read-only invariant in `AGENTS.md`.
+- Standalone `src/reconcile_libraries.py` (covered by `tests/test_reconcile_libraries.py`, including an FFmpeg end-to-end run): downloaded-folder duplicates of purchased tracks as a reviewable plan, plus Apple Music tracks missing from both libraries. Matching lives in `src/track_matching.py` (tests in `tests/test_track_matching.py`); the strict audit matcher in `matcher.py` is unchanged and is only the STRICT tier. Deletion is deliberately not implemented; adding it would require an explicit product decision and a change to the read-only invariant in `AGENTS.md`.
 - Public-file allowlist exporter, no personal defaults, synthetic tests, platform CI, documentation and generic project metadata.
 
 ## Non-negotiable invariants
