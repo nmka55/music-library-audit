@@ -24,7 +24,7 @@ from pathlib import Path
 from rapidfuzz import fuzz
 
 from matcher import score
-from normalization import normalize
+from normalization import normalize, repair_mojibake, transliterate
 
 STRICT, LIKELY, POSSIBLE = "STRICT", "LIKELY", "POSSIBLE"
 TIER_RANK = {STRICT: 0, LIKELY: 1, POSSIBLE: 2}
@@ -65,12 +65,13 @@ def core_titles(text):
 
 def prepare(row, filename=None):
     """Add matching-only fields. Needs the normalization fields from prepare_apple/offline."""
-    title = row.get("Title") or row.get("Name") or ""
-    stem = Path(filename).stem if filename else ""
+    title = repair_mojibake(row.get("Title") or row.get("Name") or "")
+    stem = repair_mojibake(Path(filename).stem) if filename else ""
     keys = core_titles(title)
     if stem:
         keys |= core_titles(stem)
     row["_keys"] = keys
+    row["_artist_latin"] = normalize(transliterate(repair_mojibake(row.get("Artist") or "")))
     row["_hard"] = frozenset(HARD_VERSION.findall(normalize(title or stem)))
     row["_stem_artist"] = None
     if stem:
@@ -79,7 +80,7 @@ def prepare(row, filename=None):
         if len(parts) == 2 and clean_core(parts[1]):
             row["_stem_artist"] = strip_the(normalize(parts[0]))
             keys.add(clean_core(parts[1]))
-        parent = Path(filename).parent.parts[-4:]
+        parent = [repair_mojibake(p) for p in Path(filename).parent.parts[-4:]]
         row["_folder"] = " " + normalize(" ".join(parent)) + " "
     else:
         row["_folder"] = ""
@@ -97,6 +98,13 @@ def artist_agreement(a, b):
         sim = fuzz.ratio(an, bn)
         if fuzz.token_set_ratio(an, bn) == 100:
             sim = max(sim, 92.0)  # "Artist & Guest" against "Artist"
+    al, bl = strip_the(a.get("_artist_latin", "")), strip_the(b.get("_artist_latin", ""))
+    if sim < 90 and al and bl and (al != an or bl != bn):
+        # Apple Music often spells Russian artists in Latin letters; the files use Cyrillic.
+        spelled = fuzz.ratio(al, bl)
+        if spelled >= 88:
+            return 92.0, "transliteration"
+        sim = max(sim, spelled)
     if sim < 90 and b.get("_stem_artist") and fuzz.ratio(b["_stem_artist"], an) >= 85:
         return 92.0, "filename"
     folder = b.get("_folder", "")

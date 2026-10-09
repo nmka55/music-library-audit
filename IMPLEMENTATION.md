@@ -83,7 +83,7 @@ Archive eligibility requires detected DRM-free status, readable metadata/audio i
 
 ## Normalization and matching, precisely
 
-Normalization case-folds Unicode, decomposes useful diacritics, normalizes punctuation/spacing and extracts featured credits from title annotations and artist separators. Numeric title qualifiers and version descriptors remain meaningful. A stripped base title is used only to judge whether a weak candidate deserves review.
+Normalization first repairs Russian text saved as Windows-1251 but read as Latin-1 (`repair_mojibake`: only words made entirely of non-ASCII Latin letters, and only when some word has at least three of them and converts to pure Cyrillic, so accented French or Spanish is untouched). Comparison fields use the repaired text; the original value is kept. `transliterate` gives a Latin spelling of Cyrillic artist names so `ВИА Гра` can match Apple Music's `VIA Gra`. Normalization case-folds Unicode, decomposes useful diacritics, normalizes punctuation/spacing and extracts featured credits from title annotations and artist separators. Numeric title qualifiers and version descriptors remain meaningful. A stripped base title is used only to judge whether a weak candidate deserves review.
 
 Version comparison preserves descriptors such as live, acoustic, demo, remix, remaster year, radio edit, extended mix, instrumental, karaoke, mono, stereo, edit and version. Selected album-level markers can also force review. Album-level generic `version`/`edit` and remaster labels are excluded from those extra album-marker checks; original album text still contributes to scoring. Untagged live/clean/explicit edits cannot be reliably distinguished without stronger evidence.
 

@@ -5,7 +5,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import reconcile_libraries as rl
 from config import DEFAULTS
-from normalization import prepare_apple, prepare_offline
+from normalization import prepare_apple, prepare_offline, repair_mojibake
 from track_matching import LIKELY, POSSIBLE, STRICT, LooseIndex, prepare
 
 CONFIG = {**DEFAULTS, "_workspace": ".", "_config_path": "config.json"}
@@ -97,6 +97,60 @@ class TierTests(unittest.TestCase):
     def test_titles_that_start_with_a_number_still_match(self):
         found = best(query("7 Rings", "Ariana Grande"), download("7 Rings", "Ariana Grande"))
         self.assertEqual(found["tier"], STRICT)
+
+
+class MojibakeTests(unittest.TestCase):
+    def test_windows_1251_read_as_latin1_is_repaired(self):
+        cases = {
+            "Ñòîï! Ñòîï! Ñòîï!": "Стоп! Стоп! Стоп!",
+            "ÂÈÀ Ãðà": "ВИА Гра",
+            "Áèîëîãèÿ [Club mix by RainMan]": "Биология [Club mix by RainMan]",
+            "Â ýòîì òû ïðîôåññîð": "В этом ты профессор",
+            "Ïîïûòêà ¹5": "Попытка №5",
+        }
+        for broken, fixed in cases.items():
+            self.assertEqual(repair_mojibake(broken), fixed)
+
+    def test_real_accented_and_cyrillic_text_is_never_changed(self):
+        for text in (
+            "Où sont les héros éphémères",
+            "Ça me fait mal à l'âme",
+            "Señor Ñoño",
+            "Beyoncé",
+            "Стоп! Снято!",
+            "",
+        ):
+            self.assertEqual(repair_mojibake(text), text)
+
+    def test_garbled_download_matches_the_real_russian_track(self):
+        a = query("Стоп! Стоп! Стоп!", "ВИА Гра")
+        row = download("Ñòîï! Ñòîï! Ñòîï!", "ÂÈÀ Ãðà", path="/net/ÂÈÀ Ãðà/Áèîëîãèÿ/01 Ñòîï.mp3")
+        found = best(a, row)
+        self.assertIn(found["tier"], (STRICT, LIKELY))
+        self.assertEqual(row["Title"], "Ñòîï! Ñòîï! Ñòîï!")  # the original tag is not rewritten
+
+
+class TransliterationTests(unittest.TestCase):
+    def test_latin_apple_artist_matches_cyrillic_file_artist(self):
+        cases = [
+            ("Ласковый май", "Laskovy May"),
+            ("Валерий Меладзе", "Valeriy Meladze"),
+            ("Конец фильма", "Konets Filma"),
+            ("Филипп Киркоров", "Philipp Kirkorov"),
+            ("Лосолын Болдбаатар", "Losolyn Boldbaatar"),
+        ]
+        for cyrillic, latin in cases:
+            with self.subTest(latin):
+                a = query("Название", latin)
+                found = best(a, download("Название", cyrillic))
+                self.assertIn(found["tier"], (STRICT, LIKELY))
+                self.assertEqual(found["basis"], "transliteration")
+
+    def test_different_artists_do_not_match_through_transliteration(self):
+        self.assertIsNone(best(query("Название", "Laskovy May"), download("Название", "Градусы")))
+        self.assertIsNone(
+            best(query("Название", "Laskovy May"), download("Другая песня", "Ласковый май"))
+        )
 
 
 class ReconcileLooseTests(unittest.TestCase):
