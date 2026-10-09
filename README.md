@@ -60,6 +60,39 @@ python3 -m venv .venv
 
 After activating the virtual environment, `python src/audit.py` also works. Direct executable paths above avoid activation and PowerShell execution-policy issues. On Linux, install the distribution's Python venv package if `python3 -m venv` is unavailable.
 
+## Compare an Apple Music XML with a purchased-music XML
+
+`src/compare_libraries.py` answers a smaller question than the audit: which tracks in your Apple Music library are not in a second (for example purchased/offline) library? It needs only Python, not FFmpeg or the dependencies above, and reads two XML exports without touching any audio.
+
+```text
+python src/compare_libraries.py
+python src/compare_libraries.py --apple "input/Library.xml" --purchased "input/Purchased.xml"
+```
+
+Without options it lists XML files found nearby and asks you to pick the Apple Music XML and then the purchased XML by number or path. The default CSV is `output/Apple_Music_Not_In_Purchased.csv` in the workspace (override with `--output`, which must stay inside the workspace). Columns: Title, Artist, Album, Year, Duration, iTunes Link, Status, Closest Purchased Track, Reason.
+
+A track is compared by Persistent ID, then by normalized title, credited artists, version markers (remix, live, remaster...) and duration within the configured tolerance. Track IDs are never used: they are per-library numbers and collide between unrelated libraries. Rows are `NOT IN PURCHASED` or `POSSIBLE MATCH` (title and artist look alike but version, artist credits, duration or video status differ; check by hand). `--include-matched` also lists confident matches as `MATCHED`. The `iTunes Link` column is filled only if the XML contains a store URL field; standard exports do not, so it is usually empty.
+
+## Find downloaded music that duplicates purchases
+
+`src/reconcile_libraries.py` adds a third source: a folder of music you collected elsewhere. It needs the normal dependencies and FFprobe (see Start here) because it reads the folder's tags and durations with the audit scanner, but it skips SHA-256, so each file is not read in full. Results are cached in `cache/reconcile`.
+
+```text
+python src/reconcile_libraries.py --apple "input/Library.xml" --purchased "input/Purchased.xml" --music-root "/path/to/downloads"
+```
+
+Omitted options are asked for interactively (`--music-root` can repeat; saved audit folders are used if present). It writes three CSV files to `output/`:
+
+| File | Contents |
+|---|---|
+| `Internet_Duplicates_Of_Purchased.csv` | One row per downloaded file that matches a purchased track, with a recommendation, both tracks' details and formats |
+| `Purchased_Albums_In_Internet_Collection.csv` | Per purchased album: tracks, how many have a downloaded copy, how many purchased files exist on disk, files to remove |
+| `Apple_Music_Missing_Everywhere.csv` | Apple Music tracks found in neither the purchased XML nor the folder (`MISSING EVERYWHERE`), or only weakly (`POSSIBLE MATCH`) |
+
+A downloaded file is a **REMOVE CANDIDATE** only when it passes the audit matcher's automatic gates (title, artist, version, duration, readable DRM-free audio) against a purchased track **and** that track's `Location` in the XML is an existing file whose size still equals the XML size. Purchased tracks without a `Location` (cloud-only, `Track Type` Remote) are `KEEP: purchased copy not downloaded`: download them in iTunes first, then export a new XML and rerun. A purchased file listed in the XML is itself never offered as a candidate. Other labels: `KEEP: purchased file not found on this computer`, `REVIEW: purchased file differs from the XML`, `REVIEW: possible match, not confident`.
+
+**The program never deletes, moves or edits anything.** Review the plan (sort by `Recommendation`, compare the format and bitrate columns, since a downloaded FLAC or 320 kbps file may sound better than a 256 kbps purchase) and remove files yourself. Run it on the computer that holds both the downloaded folder and the purchased files, otherwise every purchased file looks missing.
+
 ## Run again with an updated XML
 
 1. Export the updated library from your music application.

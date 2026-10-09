@@ -290,11 +290,14 @@ def scan_one(root, path, config):
         row["Metadata Issues"] += "; " + row["Scan Error"]
     if ok and err.strip():
         row["Metadata Issues"] += "; Embedded artwork probe warning: " + err.strip()
-    digest = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    row["SHA-256"] = digest.hexdigest()
+    if config.get("_skip_hash"):
+        row["SHA-256"] = ""
+    else:
+        digest = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        row["SHA-256"] = digest.hexdigest()
     after = path.stat()
     if (stat.st_size, stat.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         row["Scan Error"] += "; File changed during scan"
