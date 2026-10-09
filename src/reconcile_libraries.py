@@ -15,18 +15,18 @@ the workspace output directory.
 
 import argparse
 import os
-import re
 import shutil
 import sys
 from collections import defaultdict
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 from compare_libraries import (
     COLUMNS,
+    as_file_rows,
     choose_xml,
     duration_text,
     link_for,
+    location_to_path,
     output_path,
     read_tracks,
     write_xlsx,
@@ -100,17 +100,6 @@ STATE_REASON = {
 }
 
 
-def location_to_path(url):
-    """Turn an iTunes file URL into a native path (Windows drive and UNC forms included)."""
-    parsed = urlparse(url)
-    path = unquote(parsed.path)
-    if re.match(r"^/[A-Za-z]:/", path):
-        return path[1:]
-    if parsed.netloc not in ("", "localhost"):
-        return "//" + parsed.netloc + path
-    return path
-
-
 def purchased_state(track):
     """Return (state, path): is the purchased copy a real, unchanged file right now?"""
     location = track.get("Location")
@@ -145,30 +134,6 @@ def album_key(track):
         normalize(track.get("Album Artist") or track.get("Artist")),
         normalize(track.get("Album")),
     )
-
-
-def as_file_rows(tracks):
-    """Present XML tracks as file-like rows so one matcher can search them."""
-    rows = []
-    for number, track in enumerate(tracks):
-        rows.append(
-            {
-                "Full Path": f"purchased:{track.get('Persistent ID') or number}",
-                "Library Root": "purchased",
-                "Title": track.get("Name", ""),
-                "Artist": track.get("Artist", ""),
-                "Album": track.get("Album", ""),
-                "Album Artist": track.get("Album Artist", ""),
-                "Duration": (track.get("Total Time") or 0) / 1000 or None,
-                "Track Number": track.get("Track Number"),
-                "Disc Number": track.get("Disc Number"),
-                "Year": track.get("Year"),
-                "Archive Eligible": True,
-                "_track": track,
-                "_virtual": True,
-            }
-        )
-    return rows
 
 
 def plan_internet_copies(purchased, finder, config, state_of, loose_seconds):

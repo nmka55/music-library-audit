@@ -60,18 +60,20 @@ python3 -m venv .venv
 
 After activating the virtual environment, `python src/audit.py` also works. Direct executable paths above avoid activation and PowerShell execution-policy issues. On Linux, install the distribution's Python venv package if `python3 -m venv` is unavailable.
 
-## Compare an Apple Music XML with a purchased-music XML
+## Find Apple Music tracks missing from an offline library
 
-`src/compare_libraries.py` answers a smaller question than the audit: which tracks in your Apple Music library are not in a second (for example purchased/offline) library? It needs Python and openpyxl (installed by the dependency steps above), not FFmpeg, and reads two XML exports without touching any audio.
+`src/compare_libraries.py` answers: which tracks in my Apple Music library have no offline copy? Give it two XML exports: the Apple Music library, and an XML of the offline library (for example the purchased and downloaded folders combined in one iTunes library). It needs Python and the dependencies above, not FFmpeg, and reads the XML files only.
 
 ```text
 python src/compare_libraries.py
-python src/compare_libraries.py --apple "input/Library.xml" --purchased "input/Purchased.xml"
+python src/compare_libraries.py --apple "input/Library.xml" --offline "input/Offline.xml"
 ```
 
-Without options it lists XML files found nearby and asks you to pick the Apple Music XML and then the purchased XML by number or path. The default workbook is `output/Apple_Music_Not_In_Purchased.xlsx` in the workspace (override with `--output`, a `.xlsx` path inside the workspace). Columns: Title, Artist, Album, Year, Duration, iTunes Link, Status, Closest Purchased Track, Reason.
+Without options it lists XML files found nearby and asks you to pick the Apple Music XML and then the offline XML by number or path. The default workbook is `output/Apple_Music_Missing_From_Offline.xlsx` (override with `--output`, a `.xlsx` path inside the workspace). Columns: Title, Artist, Album, Year, Duration, iTunes Link, Status, Closest Offline Track, Offline File, Reason.
 
-A track is compared by Persistent ID, then by normalized title, credited artists, version markers (remix, live, remaster...) and duration within the configured tolerance. Track IDs are never used: they are per-library numbers and collide between unrelated libraries. Rows are `NOT IN PURCHASED` or `POSSIBLE MATCH` (title and artist look alike but version, artist credits, duration or video status differ; check by hand). `--include-matched` also lists confident matches as `MATCHED`. The `iTunes Link` column is filled only if the XML contains a store URL field; standard exports do not, so it is usually empty.
+Tracks are matched by title, artist and duration, **ignoring the album**, using the tiered matcher described under "Find downloaded music that duplicates purchases" (a song on a different album or compilation still counts; remaster, explicit and single-version suffixes, artist spelling differences, durations within `--duration-seconds` (default 10) and untagged files named `Artist - Title` are tolerated; live, remix and acoustic versions are not treated as the same recording). Statuses: `MISSING` (no plausible copy), `POSSIBLE MATCH` (similar, check by hand) and, with `--include-matched`, `IN OFFLINE LIBRARY`. Track IDs are never used: they are per-library numbers and collide between unrelated libraries.
+
+Only entries that are real files count as offline. Cloud-only entries (no `Location`) are ignored. When you run the script on the computer that holds the music, entries whose file no longer exists are ignored as well; on another computer the file listing is trusted and the output says so. The `iTunes Link` column is filled only if the XML contains a store URL field; standard exports do not, so it is usually empty.
 
 ## Find downloaded music that duplicates purchases
 

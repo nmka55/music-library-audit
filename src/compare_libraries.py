@@ -1,8 +1,12 @@
-"""Compare an Apple Music XML export with a purchased-music XML export.
+"""Find Apple Music tracks that are missing from an offline music library.
 
-Writes a multi-column Excel file of Apple Music tracks that are NOT confidently present in
-the purchased library. Both XML files are read-only inputs; the workbook is written inside
-the workspace output directory.
+Compares an Apple Music XML export with an XML export of the offline library (for example
+the purchased and downloaded folders combined in one iTunes library) and writes an Excel
+file listing the Apple Music tracks with no offline copy. Both XML files are read-only
+inputs; the workbook is written inside the workspace output directory.
+
+Tracks are matched on title, artist and duration, ignoring the album (see
+track_matching.py), so a song that sits on a different album or compilation still counts.
 """
 
 import argparse
@@ -10,8 +14,14 @@ import os
 import plistlib
 import sys
 from pathlib import Path
-from config import load, resolve_path
-from normalization import comparison
+from urllib.parse import unquote, urlparse
+import re
+
+from config import DEFAULTS, load, resolve_path
+from normalization import prepare_apple, prepare_offline
+from track_matching import LOOSE_SECONDS, LooseIndex
+from track_matching import POSSIBLE as WEAK
+from track_matching import prepare as prepare_query
 
 # Store-link fields are not guaranteed to exist; any of these that hold a URL are used.
 LINK_FIELDS = ("Store URL", "iTunes URL", "Apple Music URL", "URL", "Track URL", "Album URL")
@@ -23,10 +33,11 @@ COLUMNS = (
     "Duration",
     "iTunes Link",
     "Status",
-    "Closest Purchased Track",
+    "Closest Offline Track",
+    "Offline File",
     "Reason",
 )
-MATCHED, POSSIBLE, NOT_FOUND = "MATCHED", "POSSIBLE MATCH", "NOT IN PURCHASED"
+MATCHED, POSSIBLE, NOT_FOUND = "IN OFFLINE LIBRARY", "POSSIBLE MATCH", "MISSING"
 
 
 def read_tracks(path):
@@ -38,78 +49,62 @@ def read_tracks(path):
     return list(tracks.values())
 
 
-def prepare(track):
-    """Comparison-only keys; the original track dictionary is left untouched."""
-    c = comparison(track.get("Name", ""), track.get("Artist", ""), track.get("Album", ""))
-    return {
-        "track": track,
-        "title": c["Normalized Title"],
-        "base": c["Normalized Base Title"],
-        "versions": tuple(c["Version Markers"]),
-        "artists": frozenset(c["Credited Artists"]),
-        "seconds": (track.get("Total Time") or 0) / 1000 or None,
-        "video": bool(track.get("Has Video") or track.get("Music Video")),
-        "persistent": track.get("Persistent ID"),
-    }
+def location_to_path(url):
+    """Turn an iTunes file URL into a native path (Windows drive and UNC forms included)."""
+    parsed = urlparse(url)
+    path = unquote(parsed.path)
+    if re.match(r"^/[A-Za-z]:/", path):
+        return path[1:]
+    if parsed.netloc not in ("", "localhost"):
+        return "//" + parsed.netloc + path
+    return path
 
 
-def index(rows):
-    by_persistent, by_exact, by_base = {}, {}, {}
-    for r in rows:
-        if r["persistent"]:
-            by_persistent.setdefault(r["persistent"], []).append(r)
-        by_exact.setdefault((r["title"], r["versions"], r["artists"]), []).append(r)
-        by_base.setdefault(r["base"], []).append(r)
-    return by_persistent, by_exact, by_base
+def real_files(tracks):
+    """Keep tracks that are files. Returns (kept, cloud_only_count, vanished_count or None).
 
-
-def describe(row):
-    t = row["track"]
-    return f"{t.get('Name', '')} - {t.get('Artist', '')} ({t.get('Album', '')})"
-
-
-def closest(row, candidates):
-    """Prefer the candidate whose duration is nearest; unknown durations sort last."""
-    if row["seconds"] is None:
-        return candidates[0]
-    return min(
-        candidates,
-        key=lambda c: abs(c["seconds"] - row["seconds"]) if c["seconds"] else float("inf"),
+    Cloud-only entries have no Location. When this computer can see most of the listed
+    files, entries whose file no longer exists are dropped too; otherwise (the library
+    lives on another computer) the listing is trusted and vanished is None.
+    """
+    listed = [t for t in tracks if t.get("Location") and t.get("Track Type") != "Remote"]
+    cloud = len(tracks) - len(listed)
+    step = max(1, len(listed) // 200)
+    sample = listed[::step]
+    visible = bool(sample) and (
+        sum(os.path.isfile(location_to_path(t["Location"])) for t in sample) * 2 >= len(sample)
     )
+    if not visible:
+        return listed, cloud, None
+    kept = [t for t in listed if os.path.isfile(location_to_path(t["Location"]))]
+    return kept, cloud, len(listed) - len(kept)
 
 
-def classify(row, indexes, tolerance):
-    """Return (status, purchased row or None, reason). Conservative: doubt is never a match."""
-    by_persistent, by_exact, by_base = indexes
-    if row["persistent"] in by_persistent:
-        return MATCHED, by_persistent[row["persistent"]][0], "same Persistent ID"
-    exact = by_exact.get((row["title"], row["versions"], row["artists"]), [])
-    near = [
-        c
-        for c in exact
-        if row["seconds"] is not None
-        and c["seconds"] is not None
-        and abs(c["seconds"] - row["seconds"]) <= tolerance
-        and c["video"] == row["video"]
-    ]
-    if near:
-        return MATCHED, closest(row, near), "title, artist, version and duration agree"
-    if exact:
-        pick = closest(row, exact)
-        if row["video"] != pick["video"]:
-            why = "title and artist agree but one is a video"
-        elif row["seconds"] is None or pick["seconds"] is None:
-            why = "title and artist agree but a duration is missing"
-        else:
-            why = f"title and artist agree but duration differs by {abs(pick['seconds'] - row['seconds']):.0f}s"
-        return POSSIBLE, pick, why
-    similar = [c for c in by_base.get(row["base"], []) if c["artists"] & row["artists"]]
-    if similar:
-        pick = closest(row, similar)
-        if pick["versions"] != row["versions"]:
-            return POSSIBLE, pick, "same song and artist but a different version/edit"
-        return POSSIBLE, pick, "same song but the artist credits differ"
-    return NOT_FOUND, None, "no purchased track with this title and artist"
+def as_file_rows(tracks):
+    """Present XML tracks as file-like rows so the track matcher can search them."""
+    rows = []
+    for number, track in enumerate(tracks):
+        location = track.get("Location")
+        rows.append(
+            {
+                "Full Path": location_to_path(location)
+                if location
+                else f"xml-track:{track.get('Persistent ID') or number}",
+                "Library Root": "xml",
+                "Title": track.get("Name", ""),
+                "Artist": track.get("Artist", ""),
+                "Album": track.get("Album", ""),
+                "Album Artist": track.get("Album Artist", ""),
+                "Duration": (track.get("Total Time") or 0) / 1000 or None,
+                "Track Number": track.get("Track Number"),
+                "Disc Number": track.get("Disc Number"),
+                "Year": track.get("Year"),
+                "Archive Eligible": "protected" not in str(track.get("Kind", "")).casefold(),
+                "_track": track,
+                "_virtual": not location,
+            }
+        )
+    return rows
 
 
 def link_for(track):
@@ -125,14 +120,26 @@ def duration_text(track):
     return f"{int(ms // 60000)}:{int(ms // 1000 % 60):02d}" if ms else ""
 
 
-def compare(apple_tracks, purchased_tracks, tolerance=3, include_matched=False):
+def compare(
+    apple_tracks, offline_tracks, config=None, loose_seconds=LOOSE_SECONDS, include_matched=False
+):
     """Return row dictionaries for Apple Music tracks, sorted for browsing."""
-    indexes = index([prepare(t) for t in purchased_tracks])
+    config = config or DEFAULTS
+    rows = as_file_rows(offline_tracks)
+    for row in rows:
+        prepare_offline(row)
+    finder = LooseIndex(rows)
     results = []
-    for track in apple_tracks:
-        status, other, reason = classify(prepare(track), indexes, tolerance)
+    for original in apple_tracks:
+        track = dict(original)
+        prepare_apple(track)
+        prepare_query(track)
+        found = finder.find(track, config, loose_seconds)
+        best = found[0] if found else None
+        status = NOT_FOUND if not best else POSSIBLE if best["tier"] == WEAK else MATCHED
         if status == MATCHED and not include_matched:
             continue
+        b = best["file"] if best else None
         results.append(
             {
                 "Title": track.get("Name", ""),
@@ -142,8 +149,17 @@ def compare(apple_tracks, purchased_tracks, tolerance=3, include_matched=False):
                 "Duration": duration_text(track),
                 "iTunes Link": link_for(track),
                 "Status": status,
-                "Closest Purchased Track": describe(other) if other else "",
-                "Reason": reason,
+                "Closest Offline Track": (
+                    f"{b.get('Title', '')} - {b.get('Artist', '')} ({b.get('Album', '')})"
+                    if b
+                    else ""
+                ),
+                "Offline File": "" if not b or b.get("_virtual") else b["Full Path"],
+                "Reason": (
+                    f"{best['tier'].title()} match: {best['evidence']}"
+                    if best
+                    else "no offline track with this title and artist"
+                ),
                 "_sort": (
                     str(track.get("Artist", "")).casefold(),
                     str(track.get("Album", "")).casefold(),
@@ -219,7 +235,7 @@ def choose_xml(label, workspace, ask=input, tell=print, exclude=None):
         tell("That is not an existing file. Try again.")
 
 
-def output_path(c, requested=None, default_name="Apple_Music_Not_In_Purchased.xlsx"):
+def output_path(c, requested=None, default_name="Apple_Music_Missing_From_Offline.xlsx"):
     """Workbook destination: inside the workspace output folder, never over an input or music root."""
     workspace = Path(c["_workspace"])
     default = Path(c["output_excel"]).parent / default_name
@@ -238,11 +254,16 @@ def main(argv=None, ask=input, tell=print):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
-        description="Compare an Apple Music library XML with a purchased-music library XML "
-        "and write an Excel file of Apple Music tracks missing from the purchased library"
+        description="Compare an Apple Music library XML with an offline-library XML and "
+        "write an Excel file of the Apple Music tracks that have no offline copy"
     )
     parser.add_argument("--apple", help="Apple Music library XML (asked for if omitted)")
-    parser.add_argument("--purchased", help="Purchased music library XML (asked for if omitted)")
+    parser.add_argument(
+        "--offline",
+        "--purchased",
+        dest="offline",
+        help="Offline music library XML (asked for if omitted)",
+    )
     parser.add_argument(
         "--output", help="Excel .xlsx path inside the workspace (default: output/*.xlsx)"
     )
@@ -253,49 +274,59 @@ def main(argv=None, ask=input, tell=print):
     parser.add_argument(
         "--include-matched",
         action="store_true",
-        help="Also list tracks found in the purchased library (Status = MATCHED)",
+        help="Also list tracks found in the offline library (Status = IN OFFLINE LIBRARY)",
+    )
+    parser.add_argument(
+        "--duration-seconds",
+        type=float,
+        default=LOOSE_SECONDS,
+        help="Largest duration difference still treated as the same song (default: %(default)s)",
     )
     args = parser.parse_args(argv)
+    if not 0 <= args.duration_seconds <= 30:
+        parser.error("--duration-seconds must be between 0 and 30")
     c = load(args.config, args.workspace)
     workspace = Path(c["_workspace"])
-    interactive = args.apple is None or args.purchased is None
+    interactive = args.apple is None or args.offline is None
     if interactive and not sys.stdin.isatty() and ask is input:
-        parser.error("Supply --apple and --purchased when not running in a terminal.")
+        parser.error("Supply --apple and --offline when not running in a terminal.")
     apple = (
         resolve_path(args.apple, workspace)
         if args.apple
         else choose_xml("Apple Music library", workspace, ask, tell)
     )
-    purchased = (
-        resolve_path(args.purchased, workspace)
-        if args.purchased
-        else choose_xml("purchased music library", workspace, ask, tell, exclude=apple)
+    offline = (
+        resolve_path(args.offline, workspace)
+        if args.offline
+        else choose_xml("offline music library", workspace, ask, tell, exclude=apple)
     )
-    for path in (apple, purchased):
+    for path in (apple, offline):
         if not path.is_file():
             parser.error(f"XML file not found: {path}")
-    if apple == purchased:
+    if apple == offline:
         parser.error("Choose two different XML files.")
     destination = output_path(c, args.output)
-    if destination in (apple, purchased):
+    if destination in (apple, offline):
         parser.error("The workbook cannot overwrite an input XML.")
-    apple_tracks, purchased_tracks = read_tracks(apple), read_tracks(purchased)
-    rows = compare(
-        apple_tracks,
-        purchased_tracks,
-        c["duration_tolerance_seconds"],
-        args.include_matched,
-    )
+    apple_tracks, offline_tracks = read_tracks(apple), read_tracks(offline)
+    present, cloud_only, vanished = real_files(offline_tracks)
+    rows = compare(apple_tracks, present, c, args.duration_seconds, args.include_matched)
     write_xlsx(rows, destination)
     counts = {s: sum(r["Status"] == s for r in rows) for s in (MATCHED, POSSIBLE, NOT_FOUND)}
-    tell(f"\nApple Music tracks:    {len(apple_tracks):,}")
-    tell(f"Purchased tracks:      {len(purchased_tracks):,}")
+    tell(f"\nApple Music tracks:      {len(apple_tracks):,}")
+    tell(f"Offline library tracks: {len(offline_tracks):,} listed, {len(present):,} used")
+    if cloud_only:
+        tell(f"  ignored {cloud_only:,} cloud-only entries that have no file")
+    if vanished:
+        tell(f"  ignored {vanished:,} entries whose file no longer exists on this computer")
+    if vanished is None:
+        tell("  (file existence was not checked: the library files are not on this computer)")
     if args.include_matched:
-        tell(f"Matched:               {counts[MATCHED]:,}")
+        tell(f"In offline library:     {counts[MATCHED]:,}")
     else:
-        tell(f"Matched (not listed):  {len(apple_tracks) - len(rows):,}")
-    tell(f"Possible match:        {counts[POSSIBLE]:,}  (check these by hand)")
-    tell(f"Not in purchased:      {counts[NOT_FOUND]:,}")
+        tell(f"In offline library:     {len(apple_tracks) - len(rows):,}  (not listed)")
+    tell(f"Possible match:         {counts[POSSIBLE]:,}  (check these by hand)")
+    tell(f"Missing:                {counts[NOT_FOUND]:,}")
     if not any(r["iTunes Link"] for r in rows):
         tell("No iTunes/store link fields exist in this XML, so that column is empty.")
     tell(f"Excel file written: {destination}")
