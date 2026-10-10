@@ -164,6 +164,7 @@ def compare(a, b, config, loose_seconds=LOOSE_SECONDS):
         "title": title,
         "artist": artist,
         "basis": basis,
+        "same_kind": same_kind,
         "diff": diff,
         "evidence": "; ".join(notes),
     }

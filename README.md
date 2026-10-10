@@ -107,6 +107,25 @@ The tier and the purchased file's state decide the recommendation. **REMOVE CAND
 
 **The program never deletes, moves or edits anything.** Open the workbooks in Excel, review the plan (sort by `Recommendation`, compare the format and bitrate columns, since a downloaded FLAC or 320 kbps file may sound better than a 256 kbps purchase) and remove files yourself. Run it on the computer that holds both the downloaded folder and the purchased files, otherwise every purchased file looks missing.
 
+## Check MP3 files for damage (skipped chunks, truncated downloads)
+
+`src/check_mp3_integrity.py` looks for MP3 files that were damaged in transit. It only reads the files and writes an Excel report to `output/MP3_Integrity_Report.xlsx`.
+
+```text
+python src/check_mp3_integrity.py --music-root "/path/to/downloads"
+python src/check_mp3_integrity.py --music-root "/path/to/downloads" --library "Library.xml" --decode
+```
+
+The structure scan needs no FFmpeg. It walks every MPEG frame and reports places where bytes were cut out or replaced (with the time into the song), a file that ends in the middle of a frame, a file with fewer frames or bytes than its own Xing/Info/VBRI header says it should have (the usual sign of an incomplete download), a changing sample rate, and an ID3 length tag (`TLEN`) longer than the audio. `--decode` also decodes each file with FFmpeg to a discarded output, which catches damage the scan cannot see. `--library` takes one or more iTunes/Apple Music XML files and flags files that are much shorter than the same song in your library; it needs mutagen (already in the dependencies) and a title and artist tag.
+
+| Verdict | Meaning |
+|---|---|
+| CORRUPT | Data is missing or cut out (a gap of 128 bytes or more, two or more gaps, a missing-frame count from the header, a shortfall against the header's byte count, or three or more decoder errors). Replace these. |
+| SUSPECT | Smaller signs: a tiny gap, a cut-off final frame, a changed format, a short length tag, one or two decoder errors, or a file at least 2 s (or 1%) shorter than the library's version of the song. A shorter edit looks the same, so listen. |
+| UNREADABLE | Empty, not an MP3 (for example an M4A renamed to `.mp3`), or no frames found. |
+
+Only damaged files are listed unless you pass `--all`. What cannot be found: flipped bits inside the audio data that leave the frame headers intact (MP3 has no checksum to test), and whole frames removed from a file that has no length header unless a `--library` duration shows the difference (about 2 s or more). Reading every file is limited by disk speed; `--decode` adds processing time.
+
 ## Run again with an updated XML
 
 1. Export the updated library from your music application.

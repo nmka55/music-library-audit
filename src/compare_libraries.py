@@ -235,6 +235,19 @@ def choose_xml(label, workspace, ask=input, tell=print, exclude=None):
         tell("That is not an existing file. Try again.")
 
 
+def ask_folders(ask=input, tell=print):
+    tell("\nEnter the downloaded-music folder, one per answer. Enter done when finished.")
+    folders = []
+    while True:
+        raw = ask(f"Music folder {len(folders) + 1}, or done: ").strip().strip('"').strip("'")
+        if raw.casefold() in ("done", "") and folders:
+            return folders
+        if raw and Path(raw).expanduser().is_dir():
+            folders.append(str(Path(raw).expanduser()))
+        else:
+            tell("That folder does not exist. Try again." if raw else "Add at least one folder.")
+
+
 def output_path(c, requested=None, default_name="Apple_Music_Missing_From_Offline.xlsx"):
     """Workbook destination: inside the workspace output folder, never over an input or music root."""
     workspace = Path(c["_workspace"])
